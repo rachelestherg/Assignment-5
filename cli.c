@@ -1,6 +1,9 @@
 #include "kernel.h"
 #include <string.h>
 #include <sys/mman.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 static void unmap_image(struct image* image) {
     size_t mapping_size = sizeof(struct image) +
@@ -9,9 +12,72 @@ static void unmap_image(struct image* image) {
 }
 
 int generate_pagefault() {
-    int* pagefault = NULL;
-    *pagefault = 0;
-    return 0;
+    char filename[] = "/tmp/assignment5-fault-XXXXXX";
+    int fd = mkstemp(filename);
+    if (fd == -1) return -1;
+
+    const size_t file_size = 64U * 1024U * 1024U;
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 || ftruncate(fd, (off_t)file_size) == -1) {
+        close(fd);
+        unlink(filename);
+        return -1;
+    }
+
+    unsigned char* page = malloc((size_t)page_size);
+    if (page == NULL) {
+        close(fd);
+        unlink(filename);
+        return -1;
+    }
+    memset(page, 0xA5, (size_t)page_size);
+    for (size_t offset = 0; offset < file_size; offset += (size_t)page_size) {
+        ssize_t written = pwrite(fd, page, (size_t)page_size, (off_t)offset);
+        if (written != page_size) {
+            free(page);
+            close(fd);
+            unlink(filename);
+            return -1;
+        }
+    }
+    free(page);
+
+    if (fsync(fd) == -1) {
+        close(fd);
+        unlink(filename);
+        return -1;
+    }
+    int advice_status = posix_fadvise(fd, 0, (off_t)file_size, POSIX_FADV_DONTNEED);
+    if (advice_status != 0) {
+        close(fd);
+        unlink(filename);
+        errno = advice_status;
+        return -1;
+    }
+
+    unsigned char* mapping = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(fd);
+        unlink(filename);
+        return -1;
+    }
+
+    if (madvise(mapping, file_size, MADV_PAGEOUT) == -1) {
+        munmap(mapping, file_size);
+        close(fd);
+        unlink(filename);
+        return -1;
+    }
+
+    volatile unsigned long checksum = 0;
+    for (size_t offset = 0; offset < file_size; offset += (size_t)page_size) {
+        checksum += mapping[offset];
+    }
+
+    int result = munmap(mapping, file_size);
+    close(fd);
+    unlink(filename);
+    return result == -1 ? -1 : (checksum == 0 ? -1 : 0);
 }
 
 //Implement a parser in cli such that you can run your kernel with: 
@@ -23,6 +89,10 @@ int main(int argc, char** argv){
     }
 
     char* mode = argv[1];
+    if (strcmp(mode, "fault") == 0) {
+        return generate_pagefault() == 0 ? 0 : 1;
+    }
+
     char* input_filepath = argv[2];
     int width = atoi(argv[3]);
     int height = atoi(argv[4]);
