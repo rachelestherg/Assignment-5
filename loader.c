@@ -1,6 +1,8 @@
 #include "loader.h"
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <errno.h>
+#include <string.h>
 
 
 /*
@@ -27,6 +29,45 @@
  * Returns 0 on success, or -1 if the file cannot be opened or mapped.
  */
 int loadimage_mmap(char* filename, struct image* image) {
+	if (filename == NULL || image == NULL || image->width <= 0 || image->height <= 0) {
+		return -1;
+	}
+
+	if ((size_t)image->width > (SIZE_MAX - sizeof(struct image)) /
+	    ((size_t)image->height * sizeof(struct pixel))) {
+		return -1;
+	}
+
+	size_t mapping_size = sizeof(struct image) +
+		(size_t)image->width * (size_t)image->height * sizeof(struct pixel);
+	int fd = open(filename, O_RDONLY);
+	if (fd == -1) return -1;
+
+	struct stat file_stat;
+	if (fstat(fd, &file_stat) == -1 || file_stat.st_size < 0 ||
+	    (uintmax_t)file_stat.st_size < mapping_size) {
+		close(fd);
+		return -1;
+	}
+
+	void* mapping = mmap(NULL, mapping_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	int saved_errno = errno;
+	close(fd);
+	if (mapping == MAP_FAILED) {
+		errno = saved_errno;
+		return -1;
+	}
+
+	struct image stored_image;
+	memcpy(&stored_image, mapping, sizeof(stored_image));
+	if (stored_image.width != image->width || stored_image.height != image->height) {
+		munmap(mapping, mapping_size);
+		return -1;
+	}
+
+	image->width = stored_image.width;
+	image->height = stored_image.height;
+	image->pixels = (struct pixel*)((char*)mapping + sizeof(struct image));
 	return 0;
 }
 
@@ -47,7 +88,49 @@ int loadimage_mmap(char* filename, struct image* image) {
  * A failed flush to disk is reported but still returns 0.
  */
 int saveimage_mmap(char* filename, struct image* image) {
-	return 0;
+	if (filename == NULL || image == NULL || image->pixels == NULL ||
+	    image->width <= 0 || image->height <= 0) {
+		return -1;
+	}
+
+	if ((size_t)image->width > (SIZE_MAX - sizeof(struct image)) /
+	    ((size_t)image->height * sizeof(struct pixel))) {
+		return -1;
+	}
+
+	size_t pixel_size = (size_t)image->width * (size_t)image->height * sizeof(struct pixel);
+	size_t mapping_size = sizeof(struct image) + pixel_size;
+	int fd = open(filename, O_RDWR | O_CREAT | O_TRUNC,
+	              S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (fd == -1) return -1;
+
+	if (ftruncate(fd, (off_t)mapping_size) == -1) {
+		close(fd);
+		return -1;
+	}
+
+	void* mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	int saved_errno = errno;
+	close(fd);
+	if (mapping == MAP_FAILED) {
+		errno = saved_errno;
+		return -1;
+	}
+
+	struct image stored_image = {
+		.pixels = NULL,
+		.width = image->width,
+		.height = image->height
+	};
+	memcpy(mapping, &stored_image, sizeof(stored_image));
+	memcpy((char*)mapping + sizeof(stored_image), image->pixels, pixel_size);
+
+	if (msync(mapping, mapping_size, MS_SYNC) == -1) {
+		perror("msync");
+	}
+
+	int result = munmap(mapping, mapping_size);
+	return result == -1 ? -1 : 0;
 }
 
 

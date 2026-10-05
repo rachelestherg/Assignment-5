@@ -1,0 +1,11 @@
+(1) about 402 million bytes 
+(2) about 402 million bytes
+(3) Mmap finishes much faster - about 30 seconds vs over 10 mins for normal. This is because
+mmap can access the converted pixel data directly rather than having to make read calls
+for each pixel. The normal run memory rises gradually, levelling off around 393,000 KB.
+The mmap run has a spike of almost 600,000 KB. This is because mmap mode holds the kernel's
+output buffer while also mapping the the raw output file to save it.
+(4) A minor page fault occurs when a process accesses a page that is not currently 
+mapped in its page table, but the needed data is already in memory, so the OS can resolve 
+the fault without disk I/O. A major page fault requires the OS to read the needed page 
+from storage, which is slower. 
